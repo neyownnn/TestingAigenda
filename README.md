@@ -9,6 +9,7 @@ aigenda/
     ├── schema.sql           MySQL/MariaDB schema (auto-created)
     ├── main.py              FastAPI REST API + learning loop
     ├── smoke_test.py        End-to-end test of the loop against MySQL
+    ├── test_weekly_plan.py  End-to-end test of the weekly plan with half-hour times
     ├── scheduler.py         Rule-based AI Scheduler + tips
     ├── prep_survey.py       Step 1: survey .xlsx -> data/survey_profiles.csv
     ├── synth_data.py        Step 2: survey-seeded synthetic data -> data/synthetic_activity.csv
@@ -45,18 +46,23 @@ The model ships pre-trained (`rf_model.joblib`). To rebuild it from the survey: 
 | UC-10 Goals (optional) | Target date (past dates rejected), max 10 goals, +10% progress |
 | UC-11 AI Study Support (optional) | Tips, resource links (educational only), time-management advice, topic chips and a question box; general tips when data is thin |
 
-## Weekly plan (new)
+## Weekly plan: enter each subject once
 
-Every 7 days AIgenda asks for the coming week: for each day, the **subjects** the student has (optional class start/end) and their **vacant time**.
+On **Weekly Plan** the student adds each subject once: its name, class time and the days it meets, e.g. `Math 10:30 AM - 11:30 AM, Mon + Wed`. The page turns the list into the next 7 days and sends it to the API; the student is asked again every 7 days (last week's list is pre-filled).
 
-- `GET /api/weekly/status` returns `needs_prompt` (true when there is no plan, or 7 days have passed since the last one), `next_prompt_on`, and last week's plan so the form can prefill by weekday. The frontend opens **Weekly Plan** automatically when it is true and shows a dashboard banner.
+- Times can be on the hour or half hour (10:00, 10:30). The scheduler works on a 30-minute grid, so classes are placed exactly as entered. Quarter-hours are rejected (422), and so are overlapping classes on the same day.
+- A day's **study** blocks go to the subjects that have a class that day (highest rank first, every subject gets one block before any gets a second). A day with no class (for example Tuesday for a Mon/Wed subject) is not left empty: the week's other subjects fill the spare time, soonest next class first.
+- Each study block is one hour. A 30-minute block is used only when a subject would otherwise get nothing. The Random Forest scores every free start time (including half hours) and the best one is picked; the model was trained on whole hours, so 10:30 is scored like 10:00.
+- Everything outside classes, meals and sleep counts as free time (the old per-day "vacant time" inputs are gone; the API still accepts `vacant` windows).
+- `GET /api/weekly/status` returns `needs_prompt` (true when there is no plan, or 7 days have passed), `next_prompt_on`, and last week's plan so the form can prefill.
 - `PUT /api/weekly/plan` saves the 7 days (table `weekly_plans`) and generates a schedule for each day. The response lists, per day, any subject that did not fit (`report[].unplaced`).
-- `GET /api/schedule/week` returns all scheduled days; **My Schedule** has a tab per day.
-- Study and hobby blocks are placed only inside the vacant windows (no windows = any free hour). A day with no subjects entered falls back to the ranked subject list.
+- `GET /api/schedule/week` returns all scheduled days. Every item has `hour` (start, 10.5 = 10:30) and `dur` (length in hours). `PATCH /api/schedule/{id}` can move a block to a half-hour time; a move that overlaps another block is rejected (409).
 
-**Bug fix:** the scheduler gave the top subjects two blocks each and ran out of free hours after about 4 subjects, so the rest got nothing. Now every subject gets one block first, spare hours then go to second blocks, and anything that still cannot fit is reported to the student instead of silently dropped. Random Forest scoring is also batched (one model call per day), so generating a week takes about a second. Run `python test_scheduler.py` to check this without a database.
+**Upgrading an existing database:** nothing to do. On start, `main.py` changes `hour` to `DOUBLE` in `schedule_items` and `activity_log` and adds `schedule_items.dur`, keeping all existing rows.
 
-Not in this version: a "late night" focus option, meal-time inputs and subject due dates (all shown in the deck mockups).
+Tests: `python test_scheduler.py` (no database), `python test_weekly_plan.py` and `python smoke_test.py` (need MySQL; they use throwaway databases).
+
+Habits (wake-up, bedtime) still use whole hours.
 
 ## How the model learns from the database
 1. Students fill in habits, hobbies and ranked subjects, then generate a schedule (`schedule_items`; study rows store the subject rank).
