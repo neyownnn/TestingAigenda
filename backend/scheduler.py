@@ -4,10 +4,10 @@ from typing import Callable, Optional
 PEAK = {"morning": (8, 12), "afternoon": (13, 17), "evening": (18, 22)}
 
 
-def _place_meal(blocks: dict, prefs: list[int], label: str, lo: int, hi: int) -> None:
-    """Put a meal on the first preferred hour that is still free (lo < hour < hi)."""
+def _place_meal(blocks: dict, prefs: list[int], label: str, inner: set) -> None:
+    """Put a meal on the first preferred hour that is still free (must be in inner)."""
     for hr in prefs:
-        if lo < hr < hi and hr not in blocks:
+        if hr in inner and hr not in blocks:
             blocks[hr] = (label, "rest")
             return
 
@@ -26,22 +26,33 @@ def plan_day(h: dict, subjects: list[dict], hobbies: list[str],
     """
     ps, pe = PEAK[h["chrono"]]
     wake, sleep = h["wake"], h["sleep"]
+    span = (sleep - wake) % 24                               # awake hours; wraps past midnight (e.g. 7 to 3)
+    hours = [(wake + k) % 24 for k in range(span)]           # wake hour first, wind-down hour last
+    order = {hr: k for k, hr in enumerate(hours)}
+    awake = set(hours)
     legacy = classes is None
     if legacy:
         classes = [(h["cs"], h["ce"], "Classes")]
 
+    def window(s: int, e: int) -> list[int]:
+        """Hours covered by [s, e), wrapping past midnight (22 to 2 covers 22, 23, 0, 1)."""
+        return [(s + k) % 24 for k in range((e - s) % 24)]
+
     blocks: dict[int, tuple[str, str]] = {wake: ("Wake · Breakfast", "rest")}
     for s, e, label in classes:
-        for i in range(s, e):
-            if wake <= i < sleep:
-                blocks[i] = (label, "class")
-    _place_meal(blocks, [h["ce"], 12, 13] if legacy else [12, 13, 11, 14], "Lunch", wake, sleep - 1)
-    _place_meal(blocks, [18, 19, 17], "Dinner", wake, sleep - 1)
-    blocks[sleep - 1] = ("Wind down", "rest")
+        for hr in window(s, e):
+            if hr in awake:
+                blocks[hr] = (label, "class")
+    inner = set(hours[1:-1])                                 # hours that can hold meals and study
+    _place_meal(blocks, [h["ce"], 12, 13] if legacy else [12, 13, 11, 14], "Lunch", inner)
+    _place_meal(blocks, [18, 19, 17], "Dinner", inner)
+    if hours[-1] not in blocks:                              # a class in the last hour is kept, not replaced
+        blocks[hours[-1]] = ("Wind down", "rest")
 
-    free = [i for i in range(wake + 1, sleep - 1) if i not in blocks]
+    free = [hr for hr in hours[1:-1] if hr not in blocks]
     if vacant is not None:
-        free = [i for i in free if any(s <= i < e for s, e in vacant)]
+        vac = {hr for s, e in vacant for hr in window(s, e)}
+        free = [hr for hr in free if hr in vac]
 
     subs = sorted(subjects, key=lambda s: s["rank"])
     n = len(subs)
@@ -59,7 +70,7 @@ def plan_day(h: dict, subjects: list[dict], hobbies: list[str],
     def score(hour: int, rank: int) -> float:
         in_peak = int(ps <= hour < pe)
         base = in_peak + 0.01 * (24 - hour)                 # rule-based: peak first, earlier is better
-        if hour >= sleep - 2:
+        if order[hour] >= span - 2:
             base -= 0.5                                      # avoid the last hours before bed unless nothing else is left
         return base + rf.get((hour, in_peak, rank), 0.0)     # + Random Forest P(complete)
 
@@ -90,7 +101,7 @@ def plan_day(h: dict, subjects: list[dict], hobbies: list[str],
         blocks.setdefault(i, ("Free time · Rest", "rest"))
 
     out = [{"hour": i, "label": blocks[i][0], "kind": blocks[i][1], "rank": meta.get(i),
-            "in_peak": int(ps <= i < pe)} for i in sorted(blocks)]
+            "in_peak": int(ps <= i < pe)} for i in sorted(blocks, key=order.get)]
     return out, [s["name"] for s in subs if s["name"] not in placed]
 
 

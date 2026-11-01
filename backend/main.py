@@ -45,14 +45,9 @@ class Conn:
 
 
 def connect(with_db=True):
-    kw = dict(host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
-              database=DB_NAME if with_db else None, charset="utf8mb4",
-              cursorclass=pymysql.cursors.DictCursor, autocommit=False,
-              init_command="SET time_zone = '+08:00'")      # Philippine time, so CURDATE() matches the student's day
-    ca = os.environ.get("DB_SSL_CA")                         # e.g. "ca.pem" saved next to main.py (hosted MySQL needs SSL)
-    if ca:
-        kw["ssl_ca"] = os.path.join(HERE, ca)
-    return pymysql.connect(**kw)
+    return pymysql.connect(host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
+                           database=DB_NAME if with_db else None, charset="utf8mb4",
+                           cursorclass=pymysql.cursors.DictCursor, autocommit=False)
 
 
 @contextmanager
@@ -69,12 +64,9 @@ def db():
 
 
 def init_db():
-    try:
-        boot = connect(with_db=False)
-        boot.cursor().execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` CHARACTER SET utf8mb4")
-        boot.close()
-    except pymysql.err.Error:
-        log.warning("Could not create the database; assuming it already exists")
+    boot = connect(with_db=False)
+    boot.cursor().execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` CHARACTER SET utf8mb4")
+    boot.close()
     sql = re.sub(r"--.*", "", open(os.path.join(HERE, "schema.sql"), encoding="utf8").read())
     with db() as c:
         for stmt in [s.strip() for s in sql.split(";") if s.strip()]:
@@ -200,8 +192,8 @@ def get_habits(uid: int = Depends(current_user)):
 
 @app.put("/api/habits")
 def put_habits(b: Habits, uid: int = Depends(current_user)):
-    if b.sleep <= b.wake:
-        raise HTTPException(422, "Sleep time must be after wake time")
+    if b.sleep == b.wake:
+        raise HTTPException(422, "Sleep time must be different from wake time")   # sleep can be after midnight
     with db() as c:
         c.run("UPDATE habit_profiles SET wake_hour=%s,sleep_hour=%s,class_start=%s,class_end=%s,chronotype=%s,"
               "adherence=%s,distraction=%s,stress_sleep=%s WHERE user_id=%s",
@@ -310,12 +302,12 @@ def clean_day(d: DayPlan) -> dict:
             continue
         if (s.start is None) != (s.end is None):
             raise HTTPException(422, f"{name}: give both a start and an end time, or leave both blank")
-        if s.start is not None and s.end <= s.start:
+        if s.start is not None and s.end == s.start:
             raise HTTPException(422, f"{name} on {d.day}: end time must be after start time")
         seen.add(name.lower())
         subs.append({"name": name, "start": s.start, "end": s.end})
     for w in d.vacant:
-        if w.end <= w.start:
+        if w.end == w.start:
             raise HTTPException(422, f"Vacant time on {d.day}: end must be after start")
     return {"subjects": subs, "vacant": [{"start": w.start, "end": w.end} for w in d.vacant]}
 
@@ -340,9 +332,12 @@ def build_day(c, uid, day: date, h: dict, global_subs: list[dict], plan: Optiona
     scorer = ml.scorer_from(MODEL, model_profile(h, est))
     result, unplaced = scheduler.plan_day(h, subs, h["hobbies"], scorer, classes, vacant)
     rank_of = {s["name"]: s["rank"] for s in subs}
+    ticked = {(r["hour"], r["label"]) for r in c.all(
+        "SELECT hour,label FROM schedule_items WHERE user_id=%s AND day=%s AND done=1", (uid, day))}   # keep ticks
     c.run("DELETE FROM schedule_items WHERE user_id=%s AND day=%s", (uid, day))
-    c.many("INSERT INTO schedule_items(user_id,day,hour,label,kind,subject_rank) VALUES(%s,%s,%s,%s,%s,%s)",
-           [(uid, day, x["hour"], x["label"], x["kind"], rank_of.get(x["label"]) if x["kind"] == "study" else None)
+    c.many("INSERT INTO schedule_items(user_id,day,hour,label,kind,subject_rank,done) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+           [(uid, day, x["hour"], x["label"], x["kind"], rank_of.get(x["label"]) if x["kind"] == "study" else None,
+             int((x["hour"], x["label"]) in ticked))
             for x in result])
     return subs, unplaced
 
@@ -650,6 +645,4 @@ def model_status(uid: int = Depends(current_user)):
 
 
 # Serve the frontend at / (mounted last so /api/* wins)
-FRONTEND = os.path.join(HERE, "..", "frontend")
-if os.path.isdir(FRONTEND):
-    app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
+app.mount("/", StaticFiles(directory=os.path.join(HERE, "..", "frontend"), html=True), name="frontend")
