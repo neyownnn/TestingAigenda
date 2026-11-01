@@ -10,6 +10,10 @@ def _place_meal(blocks: dict, prefs: list[int], label: str, inner: set) -> None:
         if hr in inner and hr not in blocks:
             blocks[hr] = (label, "rest")
             return
+    for hr in sorted(inner):                                 # preferred hours taken: use any free hour, never drop the meal
+        if hr not in blocks:
+            blocks[hr] = (label, "rest")
+            return
 
 
 def plan_day(h: dict, subjects: list[dict], hobbies: list[str],
