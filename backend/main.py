@@ -45,9 +45,14 @@ class Conn:
 
 
 def connect(with_db=True):
-    return pymysql.connect(host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
-                           database=DB_NAME if with_db else None, charset="utf8mb4",
-                           cursorclass=pymysql.cursors.DictCursor, autocommit=False)
+    kw = dict(host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
+              database=DB_NAME if with_db else None, charset="utf8mb4",
+              cursorclass=pymysql.cursors.DictCursor, autocommit=False,
+              init_command="SET time_zone = '+08:00'")      # Philippine time, so CURDATE() matches the student's day
+    ca = os.environ.get("DB_SSL_CA")                         # e.g. "ca.pem" saved next to main.py (hosted MySQL needs SSL)
+    if ca:
+        kw["ssl_ca"] = os.path.join(HERE, ca)
+    return pymysql.connect(**kw)
 
 
 @contextmanager
@@ -64,9 +69,12 @@ def db():
 
 
 def init_db():
-    boot = connect(with_db=False)
-    boot.cursor().execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` CHARACTER SET utf8mb4")
-    boot.close()
+    try:
+        boot = connect(with_db=False)
+        boot.cursor().execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` CHARACTER SET utf8mb4")
+        boot.close()
+    except pymysql.err.Error:
+        log.warning("Could not create the database; assuming it already exists")
     sql = re.sub(r"--.*", "", open(os.path.join(HERE, "schema.sql"), encoding="utf8").read())
     with db() as c:
         for stmt in [s.strip() for s in sql.split(";") if s.strip()]:
@@ -642,4 +650,6 @@ def model_status(uid: int = Depends(current_user)):
 
 
 # Serve the frontend at / (mounted last so /api/* wins)
-app.mount("/", StaticFiles(directory=os.path.join(HERE, "..", "frontend"), html=True), name="frontend")
+FRONTEND = os.path.join(HERE, "..", "frontend")
+if os.path.isdir(FRONTEND):
+    app.mount("/", StaticFiles(directory=FRONTEND, html=True), name="frontend")
