@@ -51,7 +51,7 @@ input,select{width:100%;padding:9px 11px;border:1px solid var(--line);border-rad
 .cols i{display:block;background:var(--g2);border-radius:6px 6px 0 0;margin-bottom:4px}
 .note{font-size:12px;color:var(--mute);margin-top:10px}
 .sr{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px dashed var(--line)}.sr span:first-child{width:26px;font:700 18px Fraunces,serif;color:var(--g2)}.sr .l{flex:1}
- @media(max-width:820px){.app{flex-direction:column}nav{width:100%;position:static;height:auto;flex-direction:row;overflow-x:auto;padding:10px;align-items:center}nav .logo{padding:0 10px 0 4px}nav button{white-space:nowrap}nav .me{display:none}main{padding:20px 16px}.g4{grid-template-columns:1fr 1fr}.g2,.g2e{grid-template-columns:1fr}}
+ @media(max-width:820px){.cform{grid-template-columns:1fr 1fr}.cform input{grid-column:1/-1}.app{flex-direction:column}nav{width:100%;position:static;height:auto;flex-direction:row;overflow-x:auto;padding:10px;align-items:center}nav .logo{padding:0 10px 0 4px}nav button{white-space:nowrap}nav .me{display:none}main{padding:20px 16px}.g4{grid-template-columns:1fr 1fr}.g2,.g2e{grid-template-columns:1fr}}
 .hero{background:#0b4a0b;color:#fff;border-radius:18px;padding:40px 34px;display:flex;flex-direction:column;justify-content:center}
 .hero h1{font-size:38px;line-height:1.1}.hero h1 em{color:var(--gold);font-style:normal}.hero p{color:#cfe0c7;max-width:340px}
 .authwrap{display:grid;grid-template-columns:1fr 1fr;gap:18px;max-width:900px;margin:7vh auto;padding:0 18px}
@@ -67,6 +67,7 @@ input,select{width:100%;padding:9px 11px;border:1px solid var(--line);border-rad
 .rate{display:flex;gap:6px;margin-top:4px}.rate button{flex:1;border:1px solid var(--line);background:none;border-radius:8px;padding:6px;cursor:pointer}.rate button.on{background:#0b4a0b;color:#fff;border-color:#0b4a0b}
 .wday{border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}.wday h3{font-size:16px;margin-bottom:8px}
 .wrow{display:grid;grid-template-columns:1fr 120px 120px 34px;gap:8px;align-items:center;margin-bottom:8px}.wrow.v{grid-template-columns:1fr 1fr 34px}
+.cform{display:grid;grid-template-columns:1fr 130px 130px;gap:8px;margin-bottom:10px}.cform input,.cform select{padding:8px 10px}.chips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 12px}.crow{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line)}.crow .when{color:var(--mute);font-size:13px}
 .wrow input,.wrow select{padding:7px 9px}.wlab{font-size:12px;color:var(--mute);margin:8px 0 4px}.banner{background:var(--warn);border-radius:14px;padding:14px 18px;margin-bottom:16px;display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .dtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.dtabs button{border:1px solid var(--line);background:none;border-radius:10px;padding:6px 12px;cursor:pointer}.dtabs button.on{background:#0b4a0b;color:#fff;border-color:#0b4a0b}
 .ok{color:var(--g2);font-size:13px}.link{color:var(--g2);font-weight:700}
@@ -79,13 +80,14 @@ input,select{width:100%;padding:9px 11px;border:1px solid var(--line);border-rad
 <script>
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const fmt=h=>{const x=((h+11)%12)+1;return x+":00 "+(h%24<12?"AM":"PM")};
+const fmt=h=>{const t=Math.round(h*2)/2,H=Math.floor(t)%24,x=((H+11)%12)+1;return x+":"+(t%1?"30":"00")+" "+(H<12?"AM":"PM")};
+const durTxt=x=>x.dur&&x.dur!==1?` <span class="note">(${Math.round(x.dur*60)} min)</span>`:"";   // 30 / 90 min blocks
 const API=location.protocol==="file:"?"http://localhost:8000":"";
 const PEAK={morning:[8,12],afternoon:[13,17],evening:[18,22]};
 const HOBBIES=["Basketball","Gaming","Reading","Music","Gym","Drawing","Cooking","Walking"];
 const TOPICS=["Focus","Procrastination","Sleep","Planning"];
 let S={user:null,view:"dash",authTab:"signup",habits:null,subjects:[],sched:[],goals:[],prog:null,tips:[],summary:null,
-  genStep:0,genMs:0,support:null,topic:null,saving:"",busy:false,week:[],wstat:null,draft:null,schedDay:null};
+  genStep:0,genMs:0,support:null,topic:null,saving:"",busy:false,week:[],wstat:null,draft:null,classes:[],cf:{name:"",start:10,end:11,days:[]},schedDay:null};
 const tok=()=>{try{return localStorage.getItem("aigenda_token")||""}catch(e){return""}};
 const setTok=t=>{try{t?localStorage.setItem("aigenda_token",t):localStorage.removeItem("aigenda_token")}catch(e){}};
 
@@ -115,10 +117,13 @@ const hasSubj=()=>S.subjects.length||(S.wstat?.plan||[]).some(p=>p.day===S.wstat
 const WD=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const dlabel=iso=>{const d=new Date(iso+"T00:00");return WD[d.getDay()]+", "+d.toLocaleDateString(undefined,{month:"short",day:"numeric"})};
 const addDays=(iso,n)=>{const d=new Date(iso+"T00:00");d.setDate(d.getDate()+n);return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
-function buildDraft(){ // 7 days starting today; prefilled from last week's plan for the same weekday
-  const t=S.wstat.today,prev={};(S.wstat.previous||[]).forEach(p=>prev[new Date(p.day+"T00:00").getDay()]=p);
-  S.draft=[...Array(7).keys()].map(i=>{const day=addDays(t,i),p=prev[new Date(day+"T00:00").getDay()]||{subjects:[],vacant:[]};
-    return{day,subjects:p.subjects.map(s=>({...s})),vacant:p.vacant.map(v=>({...v}))}})}
+function buildDraft(){ // rebuild the subject list (name + time + weekdays) from last week's plan
+  const m=new Map();
+  (S.wstat.previous||[]).forEach(p=>{const wd=new Date(p.day+"T00:00").getDay();
+    p.subjects.forEach(x=>{const k=x.name.toLowerCase()+"|"+x.start+"|"+x.end;
+      if(!m.has(k))m.set(k,{name:x.name,start:x.start,end:x.end,days:[]});
+      const c=m.get(k);if(!c.days.includes(wd))c.days.push(wd)})});
+  S.classes=[...m.values()];S.cf={name:"",start:10,end:11,days:[]};S.draft=true}
 
 function logout(silent){api("/logout","POST").catch(()=>{});setTok("");S.user=null;S.habits=null;S.view="dash";if(!silent)toast("Logged out");render()}
 
@@ -126,7 +131,7 @@ function logout(silent){api("/logout","POST").catch(()=>{});setTok("");S.user=nu
 const V={
 dash(){
   const p=pct(),ni=nextIdx(),r=45,c=2*Math.PI*r,fw=peak(),pr=S.prog||{},wp=pr.week_pct||0;
-  const rows=S.sched.slice(0,9).map((x,i)=>`<div class="row ${x.done?"done":""}"><span class="t">${fmt(x.hour)}</span><i class="dot ${x.kind}"></i><span class="l">${i===ni?"<b>"+esc(x.label)+"</b>":esc(x.label)}</span>${x.done?'<span class="pill">Done</span>':i===ni?'<span class="pill next">Up next</span>':pill(x)}</div>`).join("");
+  const rows=S.sched.slice(0,9).map((x,i)=>`<div class="row ${x.done?"done":""}"><span class="t">${fmt(x.hour)}</span><i class="dot ${x.kind}"></i><span class="l">${i===ni?"<b>"+esc(x.label)+"</b>":esc(x.label)}${durTxt(x)}</span>${x.done?'<span class="pill">Done</span>':i===ni?'<span class="pill next">Up next</span>':pill(x)}</div>`).join("");
   const dueWeek=S.goals.filter(g=>g.due_date&&(new Date(g.due_date)-new Date())/864e5<=7&&g.progress<100).length;
   const banner=S.wstat?.needs_prompt?`<div class="banner"><span><b>Time to plan your new week.</b> Tell us the subjects you have each day and your vacant time.</span><button class="btn" data-go="week">Plan my week</button></div>`:"";
   return `${banner}<h1>Good ${new Date().getHours()<12?"morning":new Date().getHours()<18?"afternoon":"evening"}, ${first()}</h1><p class="sub">${new Date().toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"})} · Your focus window is ${fmt(fw[0])}–${fmt(fw[1])}.</p>
@@ -154,17 +159,16 @@ subjects(){const L=S.subjects;
   <div style="display:flex;gap:10px;margin-top:14px"><input id="ns" placeholder="Add a subject" maxlength="120"><button class="btn o" data-act="addsub">+ Add subject</button></div>
   <div class="btns"><button class="btn gold" data-go="gen" ${L.length?"":"disabled"}>+ Generate my schedule</button></div></div>`},
 
-week(){if(!S.draft)buildDraft();const st=S.wstat,H=(k,v,incl24)=>`<option value="">—</option>`+[...Array(incl24?25:24).keys()].map(i=>`<option value="${i}" ${v===i?"selected":""}>${fmt(i)}</option>`).join("");
-  const hrs=(v,min)=>[...Array(25).keys()].filter(i=>i>=min).map(i=>`<option value="${i}" ${v===i?"selected":""}>${fmt(i)}</option>`).join("");
-  const cards=S.draft.map((d,di)=>`<div class="wday"><h3>${dlabel(d.day)}${d.day===st.today?" · today":""}</h3>
-    <div class="wlab">Subjects this day <span class="note">(class time is optional)</span></div>
-    ${d.subjects.map((s,si)=>`<div class="wrow"><input data-wf="s|${di}|${si}|name" value="${esc(s.name)}" placeholder="Subject name" maxlength="120" aria-label="Subject"><select data-wf="s|${di}|${si}|start" aria-label="Class start">${H("",s.start)}</select><select data-wf="s|${di}|${si}|end" aria-label="Class end">${H("",s.end,true)}</select><button class="btn o sm" data-act="wk-rmsub" data-di="${di}" data-si="${si}" aria-label="Remove subject">✕</button></div>`).join("")}
-    <button class="btn o sm" data-act="wk-addsub" data-di="${di}" ${d.subjects.length>=15?"disabled":""}>+ Add subject</button>
-    <div class="wlab" style="margin-top:14px">Vacant time <span class="note">(study &amp; hobby blocks go here; leave empty = any free hour)</span></div>
-    ${d.vacant.map((v,vi)=>`<div class="wrow v"><select data-wf="v|${di}|${vi}|start" aria-label="Vacant from">${hrs(v.start,0).replace(/<option value="24".*?<\/option>/,"")}</select><select data-wf="v|${di}|${vi}|end" aria-label="Vacant until">${hrs(v.end,1)}</select><button class="btn o sm" data-act="wk-rmvac" data-di="${di}" data-vi="${vi}" aria-label="Remove vacant time">✕</button></div>`).join("")}
-    <div class="btns" style="margin-top:6px"><button class="btn o sm" data-act="wk-addvac" data-di="${di}" ${d.vacant.length>=8?"disabled":""}>+ Add vacant time</button>${di?`<button class="btn o sm" data-act="wk-copyprev" data-di="${di}">Copy ${WD[new Date(S.draft[di-1].day+"T00:00").getDay()]}</button>`:""}</div></div>`).join("");
-  return `<h1>Plan your week</h1><p class="sub">${st.needs_prompt?"Your plan has run out, so here is a fresh week.":"Update your plan any time."} For each of the next 7 days, add the subjects you have and the hours you’re free. We’ll ask again in 7 days.</p>
-  <div style="max-width:820px">${cards}<div class="btns"><button class="btn gold" data-act="wk-save" ${S.busy?"disabled":""}>${S.busy?"Building your week…":"Save & generate my week"}</button>${st.needs_prompt?"":`<button class="btn o" data-go="sched">Cancel</button>`}</div></div>`},
+week(){if(!S.draft)buildDraft();const st=S.wstat,cf=S.cf,opt=(v,min,max)=>[...Array((max-min)*2+1).keys()].map(i=>min+i/2).map(i=>`<option value="${i}" ${v===i?"selected":""}>${fmt(i)}</option>`).join("");
+  const ORDER=[1,2,3,4,5,6,0],chips=ORDER.map(d=>`<button type="button" class="btn ${cf.days.includes(d)?"":"o "}sm" data-act="cf-day" data-d="${d}" aria-pressed="${cf.days.includes(d)}">${WD[d]}</button>`).join("");
+  const list=S.classes.map((c,i)=>`<div class="crow"><div><b>${esc(c.name)}</b><div class="when">${c.start==null?"No class time":fmt(c.start)+" – "+fmt(c.end)} · ${ORDER.filter(d=>c.days.includes(d)).map(d=>WD[d]).join(", ")}</div></div><button class="btn o sm" data-act="cf-rm" data-i="${i}" aria-label="Remove subject">✕</button></div>`).join("")||'<p class="sub" style="margin:8px 0 0">No subjects yet. Add your first one above.</p>';
+  return `<h1>Plan your week</h1><p class="sub">${st.needs_prompt?"Your plan has run out, so here is a fresh week.":"Update your plan any time."} Add each subject once with its class time and the days it meets. We’ll fill in the next 7 days and ask again afterwards.</p>
+  <div style="max-width:820px"><div class="card"><h3 style="margin-bottom:10px">Add a subject</h3>
+    <div class="cform"><input id="cfn" data-cf="name" value="${esc(cf.name)}" placeholder="Subject (e.g. Math)" maxlength="120" aria-label="Subject"><select data-cf="start" aria-label="Class start">${opt(cf.start,0,23.5)}</select><select data-cf="end" aria-label="Class end">${opt(cf.end,0.5,24)}</select></div>
+    <div class="wlab">Days it meets</div><div class="chips">${chips}</div>
+    <button class="btn" data-act="cf-add">+ Add subject</button></div>
+  <div class="card" style="margin-top:14px"><h3>Your subjects (${S.classes.length})</h3>${list}</div>
+  <div class="btns"><button class="btn gold" data-act="wk-save" ${S.busy?"disabled":""}>${S.busy?"Building your week…":"Save & generate my week"}</button>${st.needs_prompt?"":`<button class="btn o" data-go="sched">Cancel</button>`}</div></div>`},
 
 gen(){const sm=S.summary,st=S.genStep;
   const step=(i,t,d)=>`<div class="step ${st===i-1&&st<3?"cur":""}"><span class="n">${st>=i?"✓":i}</span><b>${t}</b><small>${d}</small></div>`;
@@ -184,8 +188,8 @@ gen(){const sm=S.summary,st=S.genStep;
 sched(){const days=[...new Set(S.week.map(x=>x.day))],sd=days.includes(S.schedDay)?S.schedDay:(days.includes(S.wstat?.today)?S.wstat.today:days[0]),list=days.length?S.week.filter(x=>x.day===sd):S.sched;
   return `<h1>My schedule</h1><p class="sub">Tick activities off as you go, move them to another hour, or remove ones that don’t fit.${S.wstat?.has_plan?` Next weekly plan: ${dlabel(S.wstat.next_prompt_on)}.`:""}</p>
   ${days.length>1?`<div class="dtabs">${days.map(d=>`<button class="${d===sd?"on":""}" data-sd="${d}">${dlabel(d)}</button>`).join("")}</div>`:""}<div class="card" style="max-width:820px">
-  ${list.map(x=>`<div class="row ${x.done?"done":""}"><select data-time="${x.id}" aria-label="Time" ${x.kind==="class"?"disabled":""}>${[...Array(24).keys()].map(i=>`<option value="${i}" ${i===x.hour?"selected":""}>${fmt(i)}</option>`).join("")}</select><i class="dot ${x.kind}"></i><span class="l">${esc(x.label)}</span>${pill(x)}${x.kind==="class"?"":`<button class="btn o sm" data-tg="${x.id}|${x.done?0:1}">${x.done?"Undo":"Done"}</button>`}<button class="btn o sm" data-del="${x.id}" aria-label="Delete">✕</button></div>`).join("")||'<p class="sub">Nothing yet. Generate a schedule first.</p>'}
-  <div class="btns"><button class="btn o" data-act="gengo">Reset today to AI version</button><button class="btn" data-go="week">Edit weekly plan</button></div><p class="note">Resetting discards your manual edits. A move into an occupied hour is rejected so nothing overlaps.</p></div>`},
+  ${list.map(x=>`<div class="row ${x.done?"done":""}"><select data-time="${x.id}" aria-label="Time" ${x.kind==="class"?"disabled":""}>${[...Array(48).keys()].map(k=>k/2).map(i=>`<option value="${i}" ${i===x.hour?"selected":""}>${fmt(i)}</option>`).join("")}</select><i class="dot ${x.kind}"></i><span class="l">${esc(x.label)}${durTxt(x)}</span>${pill(x)}${x.kind==="class"?"":`<button class="btn o sm" data-tg="${x.id}|${x.done?0:1}">${x.done?"Undo":"Done"}</button>`}<button class="btn o sm" data-del="${x.id}" aria-label="Delete">✕</button></div>`).join("")||'<p class="sub">Nothing yet. Generate a schedule first.</p>'}
+  <div class="btns"><button class="btn o" data-act="gengo">Reset today to AI version</button><button class="btn" data-go="week">Edit weekly plan</button></div><p class="note">Resetting discards your manual edits. A move onto a time that is already taken is rejected so nothing overlaps.</p></div>`},
 
 progress(){const pr=S.prog||{week:[]},d=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
   return `<h1>Progress & insights</h1><p class="sub">How closely you’re following your schedule.</p>
@@ -242,16 +246,23 @@ const onClick=guard(async t=>{
   if(d.go){S.view=d.go;if(d.go==="gen"&&!S.busy){S.summary=null;S.genStep=0}if(d.go==="week")S.draft=null;if(d.go==="study")loadSupport({topic:S.topic});if(d.go!=="dash"&&d.go!=="habits"&&d.go!=="sched")await refresh();return}
   if(d.act==="out"){logout();return}
   if(d.sd){S.schedDay=d.sd;return}
-  if(d.act==="wk-addsub"){S.draft[+d.di].subjects.push({name:"",start:null,end:null});return}
-  if(d.act==="wk-rmsub"){S.draft[+d.di].subjects.splice(+d.si,1);return}
-  if(d.act==="wk-addvac"){S.draft[+d.di].vacant.push({start:13,end:17});return}
-  if(d.act==="wk-rmvac"){S.draft[+d.di].vacant.splice(+d.vi,1);return}
-  if(d.act==="wk-copyprev"){const i=+d.di,p=S.draft[i-1];S.draft[i].subjects=p.subjects.map(s=>({...s}));S.draft[i].vacant=p.vacant.map(v=>({...v}));return}
+  if(d.act==="cf-day"){const n=+d.d,D=S.cf.days;D.includes(n)?D.splice(D.indexOf(n),1):D.push(n);return}
+  if(d.act==="cf-rm"){S.classes.splice(+d.i,1);return}
+  if(d.act==="cf-add"){
+    const f=S.cf,name=f.name.trim();
+    if(!name)throw new Error("Enter a subject name");
+    if(f.end<=f.start)throw new Error("Class end time must be after the start time");
+    if(!f.days.length)throw new Error("Pick at least one day");
+    for(const c of S.classes){const shared=c.days.filter(x=>f.days.includes(x));if(!shared.length)continue;
+      if(c.name.toLowerCase()===name.toLowerCase())throw new Error(c.name+" is already on "+WD[shared[0]]+". Remove it first to change it.");
+      if(c.start!=null&&f.start<c.end&&f.end>c.start)throw new Error("Overlaps with "+c.name+" ("+fmt(c.start)+" – "+fmt(c.end)+") on "+WD[shared[0]])}
+    if(S.classes.length>=15*7)throw new Error("Too many entries");
+    S.classes.push({name,start:f.start,end:f.end,days:[...f.days]});
+    S.cf={name:"",start:f.start,end:f.end,days:[]};return}
   if(d.act==="wk-save"){
-    const days=S.draft.map(x=>({day:x.day,subjects:x.subjects.filter(s=>s.name.trim()).map(s=>({name:s.name.trim(),start:s.start??null,end:s.end??null})),vacant:x.vacant}));
-    if(!days.some(x=>x.subjects.length))throw new Error("Add at least one subject on at least one day");
-    for(const x of days){for(const s of x.subjects)if((s.start==null)!==(s.end==null))throw new Error(s.name+" ("+dlabel(x.day)+"): set both class start and end, or neither");
-      for(const w of x.vacant)if(w.end<=w.start)throw new Error("Vacant time on "+dlabel(x.day)+": end must be after start")}
+    if(!S.classes.length)throw new Error("Add at least one subject");
+    const t=S.wstat.today,days=[...Array(7).keys()].map(i=>{const day=addDays(t,i),wd=new Date(day+"T00:00").getDay();
+      return{day,subjects:S.classes.filter(c=>c.days.includes(wd)).sort((a,b)=>(a.start??99)-(b.start??99)).map(c=>({name:c.name,start:c.start,end:c.end})),vacant:[]}});
     S.busy=true;render();
     try{const r=await api("/weekly/plan","PUT",{days});S.wstat=r;S.draft=null;await refresh();S.schedDay=r.today;S.view="sched";
       const miss=(r.report||[]).filter(x=>x.unplaced.length);toast(miss.length?"Week saved. Not enough free time on "+miss.map(x=>dlabel(x.day)).join(", ")+" for: "+[...new Set(miss.flatMap(x=>x.unplaced))].join(", "):"Week saved and schedule generated")}
@@ -273,11 +284,10 @@ const onClick=guard(async t=>{
   if(d.gp){const[id,p]=d.gp.split("|");S.goals=await api(`/goals/${id}?progress=${p}`,"PATCH");return}
   if(d.gd){S.goals=await api("/goals/"+d.gd,"DELETE");return}
 });
-document.addEventListener("change",e=>{if(e.target.dataset.h||e.target.dataset.time||(e.target.dataset.wf&&e.target.tagName==="SELECT"))onChange(e.target)});
-function setWf(el){const[k,di,i,f]=el.dataset.wf.split("|"),o=(k==="s"?S.draft[+di].subjects:S.draft[+di].vacant)[+i];o[f]=f==="name"?el.value:(el.value===""?null:+el.value)}
-document.addEventListener("input",e=>{if(e.target.dataset.wf&&e.target.tagName==="INPUT")setWf(e.target)});   // typing a subject name: no re-render, so focus stays
+document.addEventListener("change",e=>{if(e.target.dataset.h||e.target.dataset.time)onChange(e.target)});
+document.addEventListener("input",e=>{if(e.target.dataset.cf==="name")S.cf.name=e.target.value});   // typing: no re-render, focus stays
+document.addEventListener("change",e=>{const f=e.target.dataset.cf;if(f&&f!=="name"){S.cf[f]=+e.target.value;if(S.cf.end<=S.cf.start&&f==="start"){S.cf.end=Math.min(24,S.cf.start+1);render()}}});
 const onChange=guard(async el=>{
-  if(el.dataset.wf){setWf(el);return}
   if(el.dataset.h){const k=el.dataset.h;S.habits[k]=+el.value;autosave();return}
   if(el.dataset.time){try{await api("/schedule/"+el.dataset.time,"PATCH",{hour:+el.value})}catch(err){toast(err.message,true)}await refresh()}
 });
@@ -291,7 +301,7 @@ document.addEventListener("submit",async e=>{
   try{await enter(await api(su?"/register":"/login","POST",body));if(su){S.view="habits";toast("Account created. Tell us about your day.")}render()}
   catch(x){S.user=null;render();$("#err").textContent=x.message}
 });
-document.addEventListener("keydown",e=>{if(e.key==="Enter"&&e.target.id==="ns")$("[data-act=addsub]").click();if(e.key==="Enter"&&e.target.id==="ng")$("[data-act=addgoal]").click()});
+document.addEventListener("keydown",e=>{if(e.key==="Enter"&&e.target.id==="ns")$("[data-act=addsub]").click();if(e.key==="Enter"&&e.target.id==="cfn")$("[data-act=cf-add]").click();if(e.key==="Enter"&&e.target.id==="ng")$("[data-act=addgoal]").click()});
 
 (async()=>{if(!tok()){render();return}
   try{S.user=await api("/me");render();await loadAll()}catch(e){if(!S.user)setTok("");if(S.user)toast(e.message,true)}render()})();

@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS schedule_items (
   id           INT AUTO_INCREMENT PRIMARY KEY,
   user_id      INT NOT NULL,
   day          DATE NOT NULL,
-  hour         TINYINT NOT NULL,
+  hour         DOUBLE NOT NULL,                 -- start time, 10.5 = 10:30
+  dur          DOUBLE NOT NULL DEFAULT 1,       -- length in hours (0.5 = 30 minutes)
   label        VARCHAR(120) NOT NULL,
   kind         ENUM('study','hobby','class','rest') NOT NULL,
   subject_rank TINYINT NULL,
@@ -84,7 +85,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
   id           INT AUTO_INCREMENT PRIMARY KEY,
   user_id      INT NOT NULL,
   day          DATE NOT NULL,
-  hour         TINYINT NOT NULL,
+  hour         DOUBLE NOT NULL,                 -- start time, 10.5 = 10:30
   kind         VARCHAR(20) NOT NULL DEFAULT 'study',
   priority     TINYINT NULL,
   day_load     TINYINT NULL,
@@ -110,7 +111,7 @@ CREATE TABLE IF NOT EXISTS model_runs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Weekly plan: every 7 days the student enters, per day, the subjects they have and their vacant time.
--- data = JSON {"subjects":[{"name","start","end"}], "vacant":[{"start","end"}]}; created_on = day the plan was submitted.
+-- data = JSON {"subjects":[{"name","start","end"}]  (start/end in hours, 10.5 = 10:30), "vacant":[{"start","end"}]}; created_on = day the plan was submitted.
 CREATE TABLE IF NOT EXISTS weekly_plans (
   user_id    INT NOT NULL,
   day        DATE NOT NULL,

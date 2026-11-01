@@ -2,116 +2,167 @@
 from typing import Callable, Optional
 
 PEAK = {"morning": (8, 12), "afternoon": (13, 17), "evening": (18, 22)}
+SLOTS = 48                                                   # a day is 48 half-hour slots, so 10:30 is a valid time
 
 
-def _place_meal(blocks: dict, prefs: list[int], label: str, inner: set) -> None:
-    """Put a meal on the first preferred hour that is still free (must be in inner)."""
-    for hr in prefs:
-        if hr in inner and hr not in blocks:
-            blocks[hr] = (label, "rest")
-            return
-    for hr in sorted(inner):                                 # preferred hours taken: use any free hour, never drop the meal
-        if hr not in blocks:
-            blocks[hr] = (label, "rest")
-            return
+def _slot(x: float) -> int:
+    """Hour as a number (10.5 = 10:30) -> half-hour slot index 0..47."""
+    return int(round(float(x) * 2)) % SLOTS
+
+
+def _hour(slot: int) -> float:
+    return slot / 2
+
+
+def _window(start: float, end: float) -> list[int]:
+    """Slots covered by [start, end), wrapping past midnight (22 to 2 covers 22:00..01:30). end may be 24."""
+    s, e = _slot(start), int(round(float(end) * 2))
+    n = e - s if e > s else (e - s + SLOTS if e < s else 0)
+    return [(s + k) % SLOTS for k in range(n)]
 
 
 def plan_day(h: dict, subjects: list[dict], hobbies: list[str],
-             scorer: Optional[Callable[[int, int, int], float]] = None,
-             classes: Optional[list[tuple[int, int, str]]] = None,
-             vacant: Optional[list[tuple[int, int]]] = None) -> tuple[list[dict], list[str]]:
-    """Plan ONE day.
+             scorer: Optional[Callable[[float, int, int], float]] = None,
+             classes: Optional[list[tuple[float, float, str]]] = None,
+             vacant: Optional[list[tuple[float, float]]] = None,
+             optional: Optional[list[dict]] = None) -> tuple[list[dict], list[str]]:
+    """Plan ONE day on a 30-minute grid.
 
-    h: wake, sleep, cs, ce, chrono.  subjects: [{name, rank}] to study today.
-    classes: [(start, end, label)] class hours for this day (default: the habit profile's cs..ce).
+    h: wake, sleep, cs, ce, chrono.  subjects: [{name, rank}] that MUST get a study block today (their class is today).
+    classes: [(start, end, label)] class times, e.g. (10.5, 11.5) = 10:30-11:30 (default: the habit profile's cs..ce).
     vacant:  [(start, end)] hours the student says are free; study/hobby blocks are only placed inside them.
-             None = every hour between wake-up and bedtime that is not busy.
-    Returns (blocks, unplaced) where unplaced = subjects that got no study block because the day is full.
+    optional: [{name, rank}] extra subjects (e.g. ones with no class today) that get a study block only if time is spare.
+    Study blocks are one hour; a 30-minute block is used only when a subject would otherwise get nothing.
+    Returns (blocks, unplaced). Each block is {hour, dur, label, kind, rank, in_peak}; unplaced = required subjects with no block.
     """
     ps, pe = PEAK[h["chrono"]]
-    wake, sleep = h["wake"], h["sleep"]
-    span = (sleep - wake) % 24                               # awake hours; wraps past midnight (e.g. 7 to 3)
-    hours = [(wake + k) % 24 for k in range(span)]           # wake hour first, wind-down hour last
-    order = {hr: k for k, hr in enumerate(hours)}
-    awake = set(hours)
+    wake, sleep = _slot(h["wake"]), _slot(h["sleep"])
+    span = (sleep - wake) % SLOTS                            # awake slots; wraps past midnight (e.g. 7 to 3)
+    seq = [(wake + k) % SLOTS for k in range(span)]          # wake slot first, wind-down last
+    order = {sl: k for k, sl in enumerate(seq)}
     legacy = classes is None
     if legacy:
         classes = [(h["cs"], h["ce"], "Classes")]
 
-    def window(s: int, e: int) -> list[int]:
-        """Hours covered by [s, e), wrapping past midnight (22 to 2 covers 22, 23, 0, 1)."""
-        return [(s + k) % 24 for k in range((e - s) % 24)]
+    taken: set[int] = set()
+    items: list[tuple[int, int, str, str, Optional[int]]] = []      # (start slot, n slots, label, kind, rank)
 
-    blocks: dict[int, tuple[str, str]] = {wake: ("Wake · Breakfast", "rest")}
+    def emit(slots: list[int], label: str, kind: str, rank: Optional[int] = None, max_n: int = SLOTS) -> None:
+        """Mark free slots as one block per run of consecutive slots (each at most max_n slots)."""
+        run: list[int] = []
+        for sl in sorted((x for x in slots if x in order and x not in taken), key=order.get):
+            if run and (order[sl] != order[run[-1]] + 1 or len(run) == max_n):
+                items.append((run[0], len(run), label, kind, rank)); run = []
+            run.append(sl)
+            taken.add(sl)
+        if run:
+            items.append((run[0], len(run), label, kind, rank))
+
     for s, e, label in classes:
-        for hr in window(s, e):
-            if hr in awake:
-                blocks[hr] = (label, "class")
-    inner = set(hours[1:-1])                                 # hours that can hold meals and study
-    _place_meal(blocks, [h["ce"], 12, 13] if legacy else [12, 13, 11, 14], "Lunch", inner)
-    _place_meal(blocks, [18, 19, 17], "Dinner", inner)
-    if hours[-1] not in blocks:                              # a class in the last hour is kept, not replaced
-        blocks[hours[-1]] = ("Wind down", "rest")
+        emit(_window(s, e), label, "class")
+    emit(seq[:2], "Wake · Breakfast", "rest", max_n=2)
+    inner = seq[2:-2]                                        # slots that can hold meals and study
+    inner_set = set(inner)
 
-    free = [hr for hr in hours[1:-1] if hr not in blocks]
+    def pair_free(a: int) -> bool:
+        b = (a + 1) % SLOTS
+        return a in inner_set and b in inner_set and a not in taken and b not in taken and order[b] == order[a] + 1
+
+    def meal(prefs: list[float], label: str) -> None:
+        """One-hour meal on the first preferred time that is free (on the hour, then on the half hour), else any free hour,
+        else any free half hour. A meal is never dropped."""
+        for hr in prefs:
+            for off in (0, 1):
+                a = (_slot(hr) + off) % SLOTS
+                if pair_free(a):
+                    emit([a, (a + 1) % SLOTS], label, "rest"); return
+        for a in inner:
+            if pair_free(a):
+                emit([a, (a + 1) % SLOTS], label, "rest"); return
+        for a in inner:
+            if a not in taken:
+                emit([a], label, "rest"); return
+
+    meal([h["ce"], 12, 13] if legacy else [12, 13, 11, 14], "Lunch")
+    meal([18, 19, 17], "Dinner")
+    emit(seq[-2:], "Wind down", "rest", max_n=2)             # a class in the last hour is kept, not replaced
+
+    free = [sl for sl in inner if sl not in taken]
     if vacant is not None:
-        vac = {hr for s, e in vacant for hr in window(s, e)}
-        free = [hr for hr in free if hr in vac]
+        vac = {sl for s, e in vacant for sl in _window(s, e)}
+        free = [sl for sl in free if sl in vac]
+    free_set = set(free)
 
     subs = sorted(subjects, key=lambda s: s["rank"])
+    extra = [s for s in (optional or []) if s["name"].lower() not in {x["name"].lower() for x in subs}]
     n = len(subs)
 
-    # Keep one slot for a hobby, but only once every subject can still get its own block.
-    reserve = 1 if hobbies and len(free) > n else 0
-    budget = max(0, len(free) - reserve)
+    # Keep one hour for a hobby, but only once every required subject can still get its own block.
+    reserve = 1 if hobbies and len(free) > 2 * n else 0
+    budget = max(0, len(free) - 2 * reserve)                 # study slots allowed today
+    used = 0
 
-    # Random Forest P(complete) for every (free hour, subject rank), fetched in a single batched call when possible.
+    # Random Forest P(complete) for every (free start time, subject rank), fetched in a single batched call when possible.
     rf: dict = {}
-    if scorer and free and subs:
-        combos = [(i, int(ps <= i < pe), r) for i in free for r in {s["rank"] for s in subs}]
+    if scorer and free and (subs or extra):
+        combos = [(_hour(sl), int(ps <= _hour(sl) < pe), r) for sl in free for r in {s["rank"] for s in subs + extra}]
         rf = scorer.batch(combos) if hasattr(scorer, "batch") else {c: scorer(*c) for c in combos}
 
-    def score(hour: int, rank: int) -> float:
+    def score(sl: int, rank: int) -> float:
+        hour = _hour(sl)
         in_peak = int(ps <= hour < pe)
-        base = in_peak + 0.01 * (24 - hour)                 # rule-based: peak first, earlier is better
-        if order[hour] >= span - 2:
-            base -= 0.5                                      # avoid the last hours before bed unless nothing else is left
+        base = in_peak + 0.01 * (24 - hour)                  # rule-based: peak first, earlier is better
+        if order[sl] >= span - 4:
+            base -= 0.5                                      # avoid the last two hours before bed unless nothing else is left
         return base + rf.get((hour, in_peak, rank), 0.0)     # + Random Forest P(complete)
 
-    meta: dict[int, int] = {}                                # hour -> subject rank (study blocks)
     placed: set[str] = set()
 
-    def put(s: dict) -> bool:
-        cand = [i for i in free if i not in blocks]
-        if not cand or len(meta) >= budget:
+    def put(s: dict, allow_half: bool = False) -> bool:
+        nonlocal used
+        room = budget - used
+        if room <= 0:
             return False
-        best = max(cand, key=lambda i: score(i, s["rank"]))
-        blocks[best] = (s["name"], "study")
-        meta[best] = s["rank"]
+        cand, size = [], 0
+        if room >= 2:
+            cand, size = [sl for sl in free if pair_free(sl) and sl in free_set and (sl + 1) % SLOTS in free_set], 2
+        if not cand and allow_half:
+            cand, size = [sl for sl in free if sl not in taken], 1
+        if not cand:
+            return False
+        best = max(cand, key=lambda sl: score(sl, s["rank"]))
+        emit([(best + k) % SLOTS for k in range(size)], s["name"], "study", s["rank"], max_n=size)
+        used += size
         placed.add(s["name"])
         return True
 
-    # Pass 1: EVERY subject gets one block, highest rank first (this is what used to run out after ~4 subjects).
+    # Pass 1: EVERY required subject gets one block, highest rank first.
     for s in subs:
-        put(s)
-    # Pass 2: spare hours go to a second block for higher-ranked subjects (all but the lowest-ranked one).
+        put(s, allow_half=True)
+    # Pass 2: spare time goes to a second block for higher-ranked subjects (all but the lowest-ranked one).
     for s in subs[:-1]:
         put(s)
+    # Pass 3: subjects with no class today (soonest next class first) fill what is still spare.
+    for s in extra:
+        put(s)
 
-    rest = [i for i in free if i not in blocks]
-    for j, i in enumerate(rest[-len(hobbies):] if hobbies else []):
-        blocks[i] = (hobbies[j % len(hobbies)], "hobby")
-    for i in free:
-        blocks.setdefault(i, ("Free time · Rest", "rest"))
+    left = [sl for sl in free if sl not in taken]
+    hob: list[int] = []                                      # hobbies take the LATEST free hours, one hour per hobby
+    for sl in sorted((x for x in left if pair_free(x) and (x + 1) % SLOTS in set(left)), key=order.get, reverse=True):
+        if len(hob) >= len(hobbies) or sl in taken or (sl + 1) % SLOTS in taken:
+            continue
+        hob.append(sl)
+        emit([sl, (sl + 1) % SLOTS], hobbies[len(hob) - 1], "hobby", max_n=2)
+    emit([sl for sl in free if sl not in taken], "Free time · Rest", "rest", max_n=2)
 
-    out = [{"hour": i, "label": blocks[i][0], "kind": blocks[i][1], "rank": meta.get(i),
-            "in_peak": int(ps <= i < pe)} for i in sorted(blocks, key=order.get)]
+    out = [{"hour": _hour(st), "dur": n_ / 2, "label": label, "kind": kind, "rank": rank,
+            "in_peak": int(ps <= _hour(st) < pe)} for st, n_, label, kind, rank in sorted(items, key=lambda x: order[x[0]])]
     return out, [s["name"] for s in subs if s["name"] not in placed]
 
 
 def generate(h: dict, subjects: list[dict], hobbies: list[str],
-             scorer: Optional[Callable[[int, int, int], float]] = None) -> list[dict]:
-    """Backwards-compatible wrapper: one day from the habit profile. Returns [{hour,label,kind}]."""
+             scorer: Optional[Callable[[float, int, int], float]] = None) -> list[dict]:
+    """Backwards-compatible wrapper: one day from the habit profile. Returns [{hour,dur,label,kind}]."""
     return plan_day(h, subjects, hobbies, scorer)[0]
 
 

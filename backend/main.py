@@ -71,6 +71,19 @@ def init_db():
     with db() as c:
         for stmt in [s.strip() for s in sql.split(";") if s.strip()]:
             c.run(stmt)
+        migrate(c)
+
+
+def migrate(c) -> None:
+    """Upgrade databases created before half-hour times: hour becomes DOUBLE (10.5 = 10:30) and schedule_items gets dur."""
+    def cols(table):
+        return {r["c"]: r["t"] for r in c.all("SELECT COLUMN_NAME AS c, DATA_TYPE AS t FROM information_schema.COLUMNS "
+                                              "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (table,))}
+    for table in ("schedule_items", "activity_log"):
+        if cols(table).get("hour") not in (None, "double"):
+            c.run(f"ALTER TABLE {table} MODIFY hour DOUBLE NOT NULL")
+    if "dur" not in cols("schedule_items"):
+        c.run("ALTER TABLE schedule_items ADD COLUMN dur DOUBLE NOT NULL DEFAULT 1 AFTER hour")
 
 
 MODEL = None
@@ -252,13 +265,13 @@ def del_subject(sid: int, uid: int = Depends(current_user)):
 # ---------- weekly plan: subjects + vacant time per day, re-asked every 7 days ----------
 class ClassSlot(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    start: Optional[int] = Field(default=None, ge=0, le=23)   # optional class time; blank = just a subject to study
-    end: Optional[int] = Field(default=None, ge=1, le=24)
+    start: Optional[float] = Field(default=None, ge=0, le=23.5)   # class time in hours, 10.5 = 10:30; blank = just a subject to study
+    end: Optional[float] = Field(default=None, ge=0.5, le=24)
 
 
 class Window(BaseModel):
-    start: int = Field(ge=0, le=23)
-    end: int = Field(ge=1, le=24)
+    start: float = Field(ge=0, le=23.5)
+    end: float = Field(ge=0.5, le=24)
 
 
 class DayPlan(BaseModel):
@@ -294,6 +307,13 @@ def plan_status(c, uid) -> dict:
             "plan": [{"day": str(r["day"]), **json.loads(r["data"])} for r in rows]}
 
 
+def half_hour(v: Optional[float], what: str) -> Optional[float]:
+    """Times are whole or half hours (10 or 10.5). Anything else is rejected."""
+    if v is not None and abs(v * 2 - round(v * 2)) > 1e-9:
+        raise HTTPException(422, f"{what}: times must be on the hour or half hour (for example 10:00 or 10:30)")
+    return None if v is None else round(v * 2) / 2
+
+
 def clean_day(d: DayPlan) -> dict:
     subs, seen = [], set()
     for s in d.subjects:
@@ -302,19 +322,48 @@ def clean_day(d: DayPlan) -> dict:
             continue
         if (s.start is None) != (s.end is None):
             raise HTTPException(422, f"{name}: give both a start and an end time, or leave both blank")
-        if s.start is not None and s.end == s.start:
+        start, end = half_hour(s.start, name), half_hour(s.end, name)
+        if start is not None and end <= start:
             raise HTTPException(422, f"{name} on {d.day}: end time must be after start time")
         seen.add(name.lower())
-        subs.append({"name": name, "start": s.start, "end": s.end})
+        subs.append({"name": name, "start": start, "end": end})
+    timed = sorted((x for x in subs if x["start"] is not None), key=lambda x: x["start"])
+    for a, b in zip(timed, timed[1:]):                         # two classes cannot run at the same time
+        if b["start"] < a["end"]:
+            raise HTTPException(422, f"{a['name']} and {b['name']} overlap on {d.day}")
     for w in d.vacant:
+        half_hour(w.start, "Vacant time"), half_hour(w.end, "Vacant time")
         if w.end == w.start:
             raise HTTPException(422, f"Vacant time on {d.day}: end must be after start")
     return {"subjects": subs, "vacant": [{"start": w.start, "end": w.end} for w in d.vacant]}
 
 
-def build_day(c, uid, day: date, h: dict, global_subs: list[dict], plan: Optional[dict]) -> tuple[list[dict], list[str]]:
+def optional_for(c, uid, day: date, own: set[str], rank_of: dict[str, int]) -> list[dict]:
+    """Subjects from the student's weekly plan that have NO class on `day`, soonest next class first (ties: ranked
+    subjects first). The scheduler studies them only with spare time, so a day without classes still gets a schedule."""
+    rows = c.all("SELECT day,data FROM weekly_plans WHERE user_id=%s AND day >= CURDATE() ORDER BY day LIMIT 14", (uid,))
+    by_weekday: dict[int, set[str]] = {}
+    names: dict[str, str] = {}
+    for r in rows:
+        for s in json.loads(r["data"])["subjects"]:
+            by_weekday.setdefault(r["day"].weekday(), set()).add(s["name"].lower())
+            names.setdefault(s["name"].lower(), s["name"])
+    top = max(rank_of.values(), default=0)
+    out = []
+    for low, name in names.items():
+        if low in own:
+            continue
+        nxt = next((k for k in range(1, 8) if low in by_weekday.get((day + timedelta(days=k)).weekday(), ())), 8)
+        out.append((nxt, rank_of.get(low, top + 1), name))
+    out.sort()
+    return [{"name": n, "rank": rank_of.get(n.lower(), top + i + 1)} for i, (_, _, n) in enumerate(out)]
+
+
+def build_day(c, uid, day: date, h: dict, global_subs: list[dict], plan: Optional[dict],
+              with_optional: bool = True) -> tuple[list[dict], list[str]]:
     """Generate and store one day's schedule. Returns (study subject list, unplaced subjects)."""
     classes = vacant = None
+    extra: list[dict] = []
     if plan is not None:                                         # that day's own subjects and vacant time win
         rank_of = {s["name"].lower(): s["rank"] for s in global_subs}
         top = max(rank_of.values(), default=0)
@@ -323,23 +372,25 @@ def build_day(c, uid, day: date, h: dict, global_subs: list[dict], plan: Optiona
             subs.append({"name": s["name"], "rank": rank_of.get(s["name"].lower(), top + i + 1)})
         classes = [(s["start"], s["end"], "Class · " + s["name"]) for s in plan["subjects"] if s["start"] is not None]
         vacant = [(w["start"], w["end"]) for w in plan["vacant"]] or None
-        if not subs:
-            subs = list(global_subs)                              # nothing entered for this day: fall back to the ranked list
+        if with_optional:                                        # other subjects of the week fill spare time on this day
+            extra = optional_for(c, uid, day, {s["name"].lower() for s in plan["subjects"]}, rank_of)
+        if not subs and not extra:
+            subs = list(global_subs)                              # nothing entered this week: fall back to the ranked list
     else:
         subs = list(global_subs)
     # Estimate the day's load for the model, then place blocks (the final count is what gets logged later).
-    est = scheduler.n_study_blocks(len(subs))
+    est = scheduler.n_study_blocks(len(subs) + min(len(extra), 3))
     scorer = ml.scorer_from(MODEL, model_profile(h, est))
-    result, unplaced = scheduler.plan_day(h, subs, h["hobbies"], scorer, classes, vacant)
-    rank_of = {s["name"]: s["rank"] for s in subs}
+    result, unplaced = scheduler.plan_day(h, subs, h["hobbies"], scorer, classes, vacant, extra)
+    rank_of = {s["name"]: s["rank"] for s in subs + extra}
     ticked = {(r["hour"], r["label"]) for r in c.all(
         "SELECT hour,label FROM schedule_items WHERE user_id=%s AND day=%s AND done=1", (uid, day))}   # keep ticks
     c.run("DELETE FROM schedule_items WHERE user_id=%s AND day=%s", (uid, day))
-    c.many("INSERT INTO schedule_items(user_id,day,hour,label,kind,subject_rank,done) VALUES(%s,%s,%s,%s,%s,%s,%s)",
-           [(uid, day, x["hour"], x["label"], x["kind"], rank_of.get(x["label"]) if x["kind"] == "study" else None,
+    c.many("INSERT INTO schedule_items(user_id,day,hour,dur,label,kind,subject_rank,done) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+           [(uid, day, x["hour"], x["dur"], x["label"], x["kind"], rank_of.get(x["label"]) if x["kind"] == "study" else None,
              int((x["hour"], x["label"]) in ticked))
             for x in result])
-    return subs, unplaced
+    return subs + extra, unplaced
 
 
 @app.get("/api/weekly/status")
@@ -368,7 +419,8 @@ def save_weekly_plan(b: WeekPlan, uid: int = Depends(current_user)):
         for day in sorted(days):
             c.run("INSERT INTO weekly_plans(user_id,day,data,created_on) VALUES(%s,%s,%s,%s)",
                   (uid, day, json.dumps(days[day]), today))
-            if days[day]["subjects"] or global_subs:
+        for day in sorted(days):
+            if days[day]["subjects"] or global_subs or any(p["subjects"] for p in days.values()):
                 _, unplaced = build_day(c, uid, day, h, global_subs, days[day])
                 report.append({"day": str(day), "unplaced": unplaced})
         return {**plan_status(c, uid), "report": report}
@@ -377,7 +429,7 @@ def save_weekly_plan(b: WeekPlan, uid: int = Depends(current_user)):
 # ---------- schedule (UC-04, UC-05) ----------
 def items(c, uid, day=None):
     day = day or today_of(c)
-    return c.all("SELECT id,hour,label,kind,done FROM schedule_items WHERE user_id=%s AND day=%s ORDER BY hour", (uid, day))
+    return c.all("SELECT id,hour,dur,label,kind,done FROM schedule_items WHERE user_id=%s AND day=%s ORDER BY hour", (uid, day))
 
 
 def model_profile(h, n_blocks):
@@ -415,7 +467,7 @@ def get_schedule(uid: int = Depends(current_user)):
 def get_week_schedule(uid: int = Depends(current_user)):
     """Every scheduled day from today on, each row tagged with its date."""
     with db() as c:
-        rows = c.all("SELECT id,day,hour,label,kind,done FROM schedule_items WHERE user_id=%s AND day >= CURDATE() "
+        rows = c.all("SELECT id,day,hour,dur,label,kind,done FROM schedule_items WHERE user_id=%s AND day >= CURDATE() "
                      "AND day < CURDATE() + INTERVAL 7 DAY ORDER BY day,hour", (uid,))
     return [{**r, "day": str(r["day"])} for r in rows]
 
@@ -426,7 +478,7 @@ def schedule_summary(uid: int = Depends(current_user)):
     with db() as c:
         today = today_of(c)
         h = load_habits(c, uid)
-        rows = c.all("SELECT hour,kind,label,subject_rank FROM schedule_items WHERE user_id=%s AND day=%s", (uid, today))
+        rows = c.all("SELECT hour,dur,kind,label,subject_rank FROM schedule_items WHERE user_id=%s AND day=%s", (uid, today))
         glob = c.all("SELECT name FROM subjects WHERE user_id=%s", (uid,))
         plan = load_plan(c, uid, today)
     wanted = [s["name"] for s in plan["subjects"]] if plan and plan["subjects"] else [s["name"] for s in glob]
@@ -435,7 +487,7 @@ def schedule_summary(uid: int = Depends(current_user)):
     score = ml.scorer_from(MODEL, model_profile(h, len(study)))
     pc = [score(r["hour"], int(ps <= r["hour"] < pe), r["subject_rank"] or 3) for r in study] if score else []
     got = {r["label"] for r in study}
-    return {"study_hours": len(study), "hobby_hours": sum(1 for r in rows if r["kind"] == "hobby"),
+    return {"study_hours": sum(r["dur"] for r in study), "hobby_hours": sum(r["dur"] for r in rows if r["kind"] == "hobby"),
             "study_blocks_in_focus_window": sum(1 for r in study if ps <= r["hour"] < pe),
             "predicted_completion": round(100 * sum(pc) / len(pc)) if pc else None,
             "focus_window": [ps, pe], "free_blocks": sum(1 for r in rows if r["kind"] in ("rest", "hobby", "study")),
@@ -444,21 +496,24 @@ def schedule_summary(uid: int = Depends(current_user)):
 
 class Patch(BaseModel):
     done: Optional[bool] = None
-    hour: Optional[int] = Field(default=None, ge=0, le=23)     # reschedule to another hour (UC-05)
+    hour: Optional[float] = Field(default=None, ge=0, le=23.5)   # reschedule to another start time, 10.5 = 10:30 (UC-05)
     label: Optional[str] = Field(default=None, min_length=1, max_length=120)
 
 
 @app.patch("/api/schedule/{iid}")
 def patch_item(iid: int, b: Patch, uid: int = Depends(current_user)):
     with db() as c:
-        cur = c.one("SELECT id,hour,day FROM schedule_items WHERE id=%s AND user_id=%s", (iid, uid))
+        cur = c.one("SELECT id,hour,dur,day FROM schedule_items WHERE id=%s AND user_id=%s", (iid, uid))
         if not cur:
             raise HTTPException(404, "Not found")
+        b.hour = half_hour(b.hour, "Time")
         if b.hour is not None and b.hour != cur["hour"]:
-            clash = c.one("SELECT label FROM schedule_items WHERE user_id=%s AND day=%s AND hour=%s AND id<>%s",
-                          (uid, cur["day"], b.hour, iid))
+            if b.hour + cur["dur"] > 24:
+                raise HTTPException(422, "That block would run past midnight")
+            clash = c.one("SELECT label FROM schedule_items WHERE user_id=%s AND day=%s AND id<>%s "
+                          "AND hour < %s AND hour + dur > %s", (uid, cur["day"], iid, b.hour + cur["dur"], b.hour))
             if clash:                                              # UC-05 exception: flag the conflict
-                raise HTTPException(409, f"Conflict: {clash['label']} is already scheduled at that hour")
+                raise HTTPException(409, f"Conflict: {clash['label']} is already scheduled at that time")
         sets, args = ["source='manual'"], []
         for col, val in (("done", None if b.done is None else int(b.done)), ("hour", b.hour), ("label", b.label)):
             if val is not None:
